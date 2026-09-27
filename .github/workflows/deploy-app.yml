@@ -1,0 +1,144 @@
+name: Terraform - app dev og test
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Velg miljø"
+        required: true
+        default: dev
+        type: choice
+        options:
+          - dev
+          - test
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: terraform-app-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+
+    defaults:
+      run:
+        shell: bash
+        working-directory: stacks/app
+
+    env:
+      TF_INPUT: "false"
+      TF_IN_AUTOMATION: "true"
+
+      ARM_USE_OIDC: "true"
+      ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      TARGET_ENV: ${{ inputs.environment }}
+      TF_STATE_KEY: "${{ inputs.environment }}/app.tfstate"
+      TFVARS_SECRET: "app-${{ inputs.environment }}-tfvars"
+      PASSWORD_SECRET: "app-${{ inputs.environment }}-admin-password"
+
+    steps:
+      - name: Hent koden
+        uses: actions/checkout@v5
+
+      - name: Installer Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Installer Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Installer leser for backend-konfigurasjon
+        run: python -m pip install python-hcl2==8.1.4
+
+      - name: Logg inn i Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Vis Azure-identitet
+        run: az account show --output json
+
+      - name: Init
+        run: |
+          terraform init \
+            -backend-config=../../shared/backend.hcl \
+            -backend-config="key=$TF_STATE_KEY"
+            
+      - name: Validate
+        run: terraform validate
+
+      - name: Hent appens parameterfil
+        run: |
+          umask 077
+          az keyvault secret download \
+            --vault-name kv-piaeb \
+            --name "$TFVARS_SECRET" \
+            --file "$RUNNER_TEMP/app.tfvars" \
+            --encoding utf-8 \
+            --output none
+
+      - name: Hent backend-verdier fra felles konfigurasjon
+        run: |
+          umask 077
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import hcl2
+
+          with open("../../shared/backend.hcl", encoding="utf-8") as source:
+              backend = hcl2.load(source)
+
+          values = {
+              "backend_resource_group_name": backend["resource_group_name"],
+              "backend_storage_account_name": backend["storage_account_name"],
+              "backend_container_name": backend["container_name"],
+          }
+
+          target = Path(os.environ["RUNNER_TEMP"]) / "app-backend.tfvars.json"
+          with target.open("w", encoding="utf-8") as output:
+              json.dump(values, output)
+          PY
+
+      - name: Hent administratorpassord og lag plan
+        run: |
+          umask 077
+
+          admin_password="$(az keyvault secret show \
+            --vault-name kv-piaeb \
+            --name "$PASSWORD_SECRET" \
+            --query value \
+            --output tsv)"
+
+          test -n "$admin_password"
+          printf '::add-mask::%s\n' "$admin_password"
+          export TF_VAR_admin_password="$admin_password"
+
+          terraform plan \
+            -var-file="$RUNNER_TEMP/app.tfvars" \
+            -var-file="$RUNNER_TEMP/app-backend.tfvars.json" \
+            -var="environment=$TARGET_ENV" \
+            -out="$RUNNER_TEMP/app.tfplan"
+
+      - name: Apply
+        run: terraform apply "$RUNNER_TEMP/app.tfplan"
+
+      - name: Slett midlertidige filer
+        if: always()
+        working-directory: ${{ runner.temp }}
+        run: |
+          rm -f "$RUNNER_TEMP/app.tfvars"
+          rm -f "$RUNNER_TEMP/app-backend.tfvars.json"
+          rm -f "$RUNNER_TEMP/app.tfplan"
+        
