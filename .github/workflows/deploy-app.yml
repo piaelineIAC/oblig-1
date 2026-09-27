@@ -100,10 +100,15 @@ jobs:
           with open("../../shared/backend.hcl", encoding="utf-8") as source:
               backend = hcl2.load(source)
 
+          def text_value(value):
+            if value.startswith('"') and value.endswith('"'):
+                return json.loads(value)
+            return value
+        
           values = {
-              "backend_resource_group_name": backend["resource_group_name"],
-              "backend_storage_account_name": backend["storage_account_name"],
-              "backend_container_name": backend["container_name"],
+              "backend_resource_group_name": text_value(backend["resource_group_name"]),
+              "backend_storage_account_name": text_value(backend["storage_account_name"]),
+              "backend_container_name": text_value(backend["container_name"]),
           }
 
           target = Path(os.environ["RUNNER_TEMP"]) / "app-backend.tfvars.json"
