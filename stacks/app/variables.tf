@@ -51,18 +51,6 @@ variable "vm_size" {
   description = "VM-SKU for dette miljøet."
 }
 
-variable "admin_username" {
-  type        = string
-  default     = "tfadmin"
-  description = "Lokal administratorbruker på maskinen."
-}
-
-variable "admin_password" {
-  type        = string
-  sensitive   = true
-  description = "Passord for administratorbrukeren."
-}
-
 variable "backend_storage_account_name" {
   type        = string
   description = "Navnet på storage account som inneholder nettverksstate."
